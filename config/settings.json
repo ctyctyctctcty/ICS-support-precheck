@@ -1,0 +1,29 @@
+﻿{
+  "data_dirs": {
+    "source": "data/source",
+    "network_ready": "data/network_ready",
+    "needs_confirmation": "data/needs_confirmation",
+    "error": "data/error"
+  },
+  "required_security_group": "",
+  "standard_columns": [
+    "userID",
+    "name",
+    "company",
+    "email",
+    "hostname",
+    "IP"
+  ],
+  "internet_aliases": [
+    "internet",
+    "internet access",
+    "インターネット",
+    "インターネットアクセス",
+    "インタネット",
+    "外部接続",
+    "インターネット接続",
+    "internet接続",
+    "全internet",
+    "全インターネット"
+  ]
+}

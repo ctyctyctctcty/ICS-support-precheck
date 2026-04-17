@@ -1,0 +1,15 @@
+config/.env
+__pycache__/
+*.pyc
+
+data/source/*
+!data/source/.gitkeep
+
+data/network_ready/*
+!data/network_ready/.gitkeep
+
+data/needs_confirmation/*
+!data/needs_confirmation/.gitkeep
+
+data/error/*
+!data/error/.gitkeep
