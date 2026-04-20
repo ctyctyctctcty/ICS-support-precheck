@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import ipaddress
 import re
@@ -165,9 +165,18 @@ def _ps_single_quote(value: str) -> str:
     return str(value).replace("'", "''")
 
 
+def _build_dhcp_lookup_script(ip: str) -> str:
+    address = _ps_single_quote(ip)
+    return (
+        f"$lease = Get-DhcpServerv4Lease -IPAddress '{address}' -ErrorAction SilentlyContinue | Select-Object -First 1; "
+        "if ($lease) { $lease.IPAddress.ToString() }"
+    )
+
+
 def _dhcp_command(ip: str, dhcp_server: str, username: str = '', password: str = '', domain: str = '') -> List[str]:
     server = _ps_single_quote(dhcp_server)
-    address = _ps_single_quote(ip)
+    remote_script = _ps_single_quote(_build_dhcp_lookup_script(ip))
+
     if username and password:
         qualified_user = f'{domain}\\{username}' if domain else username
         user = _ps_single_quote(qualified_user)
@@ -175,17 +184,15 @@ def _dhcp_command(ip: str, dhcp_server: str, username: str = '', password: str =
         script = (
             f"$secure = ConvertTo-SecureString '{secret}' -AsPlainText -Force; "
             f"$cred = [System.Management.Automation.PSCredential]::new('{user}', $secure); "
-            f"$session = New-CimSession -ComputerName '{server}' -Credential $cred; "
-            "try { "
-            f"Get-DhcpServerv4Lease -CimSession $session -IPAddress '{address}' -ErrorAction SilentlyContinue | "
-            "Select-Object -First 1 -ExpandProperty IPAddress "
-            "} finally { if ($session) { Remove-CimSession $session } }"
+            f"Invoke-Command -ComputerName '{server}' -Credential $cred "
+            f"-ScriptBlock ([scriptblock]::Create('{remote_script}'))"
         )
     else:
         script = (
-            f"Get-DhcpServerv4Lease -ComputerName '{server}' -IPAddress '{address}' "
-            "-ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty IPAddress"
+            f"Invoke-Command -ComputerName '{server}' "
+            f"-ScriptBlock ([scriptblock]::Create('{remote_script}'))"
         )
+
     return ['powershell', '-NoProfile', '-Command', script]
 
 
@@ -207,14 +214,19 @@ def dhcp_check(
             _dhcp_command(row.IP, dhcp_server, username, password, domain),
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=45,
             check=False,
         )
     except Exception as exc:
         return [f'{row.userID}: DHCP確認を実行できませんでした。手動確認してください。詳細: {exc}']
 
     if completed.returncode != 0:
-        detail = (completed.stderr or '').strip()
+        detail = ((completed.stderr or '').strip() or (completed.stdout or '').strip())
+        if 'Access is denied' in detail or 'アクセスが拒否' in detail:
+            return [
+                f'{row.userID}: DHCP確認に失敗しました。{dhcp_server} への PowerShell リモート実行権限、'
+                'または DHCP 読み取り権限が不足している可能性があります。手動確認してください。'
+            ]
         return [f'{row.userID}: DHCP確認に失敗しました。手動確認してください。詳細: {detail}']
     if (completed.stdout or '').strip():
         return [f'{row.userID}: 対象IP {row.IP} はDHCPリース対象の可能性があります。申請者へ固定IPか確認してください。']
