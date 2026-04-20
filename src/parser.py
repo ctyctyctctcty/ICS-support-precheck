@@ -11,8 +11,8 @@ from xlsx_io import SheetData, workbook_as_text
 
 HEADER_ALIASES = {
     'account': ['対象アカウント', 'アカウント', 'ユーザーid', 'ユーザid', 'userid', 'user id', 'userID', 'アカウントid'],
-    'name': ['対象者氏名', '氏名', '利用者名', '対象者名', '名前', 'ユーザー名'],
-    'company': ['対象者会社名', '会社名', '所属会社', '会社', 'ベンダー', '協力会社'],
+    'name': ['対象者氏名', '氏名', '利用者名', '対象者名', '名前', 'ユーザー名', 'name', 'full name', 'user name', 'target name'],
+    'company': ['対象者会社名', '会社名', '所属会社', '会社', 'ベンダー', '協力会社', 'company', 'vendor'],
     'email': ['対象者メールアドレス', 'メールアドレス', 'メール', 'email', 'e-mail'],
     'hostname': ['接続先サーバー名', 'サーバー名', '接続先server', 'hostname', 'host name', 'ホスト名', '接続先ホスト名'],
     'ip': ['ipアドレス', 'ip address', 'ip', '接続先ip', '接続先ipアドレス'],
@@ -226,3 +226,6 @@ def parse_application(path: Path, sheets: Sequence[SheetData], env: Dict[str, st
     if not ai_result.blockers:
         return ai_result
     return ParseResult([], rule_result.blockers + ai_result.blockers)
+
+
+

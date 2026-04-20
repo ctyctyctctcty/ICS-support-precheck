@@ -1,6 +1,10 @@
 config/.env
 __pycache__/
 *.pyc
+.venv/
+
+frontend/node_modules/
+frontend/dist/
 
 data/source/*
 !data/source/.gitkeep

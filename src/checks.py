@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import csv
 import ipaddress
+import json
 import re
 import subprocess
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 ACCOUNT_RE = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
@@ -47,6 +50,26 @@ class CheckResult:
         return bool(self.confirmations)
 
 
+@dataclass(frozen=True)
+class DhcpRange:
+    start: ipaddress.IPv4Address
+    end: ipaddress.IPv4Address
+    source: str = ''
+    name: str = ''
+
+    def contains(self, ip: ipaddress.IPv4Address) -> bool:
+        return int(self.start) <= int(ip) <= int(self.end)
+
+    def label(self) -> str:
+        label_parts = []
+        if self.name:
+            label_parts.append(self.name)
+        label_parts.append(f'{self.start}-{self.end}')
+        if self.source:
+            label_parts.append(f'source: {self.source}')
+        return ' / '.join(label_parts)
+
+
 def compact_text(value: str) -> str:
     return re.sub(r'\s+', '', str(value or '')).lower()
 
@@ -62,7 +85,7 @@ def normalize_internet(value: str, aliases: Sequence[str]) -> Optional[str]:
 def normalize_ip_value(value: str, internet_aliases: Sequence[str]) -> tuple[Optional[str], Optional[str], Optional[str]]:
     raw = str(value or '').strip()
     if not raw:
-        return None, None, 'IPアドレスが未記入です。'
+        return None, None, 'IP address is missing.'
 
     internet = normalize_internet(raw, internet_aliases)
     if internet:
@@ -72,16 +95,16 @@ def normalize_ip_value(value: str, internet_aliases: Sequence[str]) -> tuple[Opt
         if '/' in raw:
             network = ipaddress.ip_network(raw, strict=False)
             if network.version != 4:
-                return None, None, 'IPv4以外のCIDRは対応していません。'
+                return None, None, 'Only IPv4 CIDR ranges are supported.'
             if network.prefixlen == 32:
                 return str(network.network_address), 'ip', None
             return str(network), 'cidr', None
         ip = ipaddress.ip_address(raw)
         if ip.version != 4:
-            return None, None, 'IPv4以外のIPアドレスは対応していません。'
+            return None, None, 'Only IPv4 addresses are supported.'
         return str(ip), 'ip', None
     except ValueError:
-        return None, None, f'IPアドレスの形式が正しくありません: {raw}'
+        return None, None, f'Invalid IP address format: {raw}'
 
 
 def validate_row(row: StandardRow, internet_aliases: Sequence[str]) -> tuple[Optional[StandardRow], List[str]]:
@@ -91,23 +114,23 @@ def validate_row(row: StandardRow, internet_aliases: Sequence[str]) -> tuple[Opt
     ip_value, _, ip_error = normalize_ip_value(row.IP, internet_aliases)
 
     if not user_id:
-        blockers.append('対象アカウントが未記入です。')
+        blockers.append('Target account is missing.')
     elif not ACCOUNT_RE.fullmatch(user_id):
-        blockers.append(f'対象アカウントの形式が正しくありません: {user_id}')
+        blockers.append(f'Invalid target account format: {user_id}')
 
     if not name:
-        blockers.append('対象者氏名が未記入です。')
+        blockers.append('Target user name is missing.')
 
     if ip_error:
         blockers.append(ip_error)
 
     email = row.email.strip()
     if email and not EMAIL_RE.fullmatch(email):
-        blockers.append(f'対象者メールアドレスの形式が正しくありません: {email}')
+        blockers.append(f'Invalid target user email address format: {email}')
 
     hostname = row.hostname.strip()
     if hostname and not HOSTNAME_RE.fullmatch(hostname):
-        blockers.append(f'接続先サーバー名の形式が正しくありません: {hostname}')
+        blockers.append(f'Invalid destination hostname format: {hostname}')
 
     if blockers:
         return None, blockers
@@ -126,6 +149,13 @@ def short_hostname(value: str) -> str:
     return str(value or '').strip().rstrip('.').split('.')[0].lower()
 
 
+def jp_item(user_id: str, summary: str, detail: str = '') -> str:
+    prefix = f'{user_id}: ' if user_id else ''
+    if detail:
+        return f'{prefix}{summary} ({detail})'
+    return f'{prefix}{summary}'
+
+
 def reverse_dns_check(row: StandardRow, ip_kind: str) -> List[str]:
     if ip_kind != 'ip' or not row.hostname.strip():
         return []
@@ -139,11 +169,11 @@ def reverse_dns_check(row: StandardRow, ip_kind: str) -> List[str]:
             check=False,
         )
     except Exception as exc:
-        return [f'{row.userID}: nslookup {row.IP} を実行できませんでした。手動確認してください。詳細: {exc}']
+        return [jp_item(row.userID, '逆引き確認不可', f'IP={row.IP}, 手動確認, detail={exc}')]
 
     output = (completed.stdout or '') + '\n' + (completed.stderr or '')
     if completed.returncode != 0:
-        return [f'{row.userID}: nslookup {row.IP} が失敗しました。接続先サーバー名 {row.hostname} を手動確認してください。']
+        return [jp_item(row.userID, '逆引き確認不可', f'IP={row.IP}, 申請ホスト名={row.hostname}, 手動確認')]
 
     names = []
     for line in output.splitlines():
@@ -153,83 +183,142 @@ def reverse_dns_check(row: StandardRow, ip_kind: str) -> List[str]:
             names.append(line.split(':', 1)[1].strip().rstrip('.'))
 
     if not names:
-        return [f'{row.userID}: nslookup {row.IP} でホスト名を確認できませんでした。申請値 {row.hostname} を手動確認してください。']
+        return [jp_item(row.userID, '逆引きホスト名なし', f'IP={row.IP}, 申請ホスト名={row.hostname}, 手動確認')]
 
     requested = short_hostname(row.hostname)
     if any(short_hostname(name) == requested for name in names):
         return []
-    return [f'{row.userID}: DNS逆引き結果 ({", ".join(names)}) と申請された接続先サーバー名 ({row.hostname}) が一致しません。']
+    return [jp_item(row.userID, 'ホスト名一致しない', f'申請={row.hostname}, 逆引き={", ".join(names)}')]
 
 
-def _ps_single_quote(value: str) -> str:
-    return str(value).replace("'", "''")
+def _first_value(record: Dict[str, Any], keys: Iterable[str]) -> str:
+    lower_map = {str(key).lower().replace('_', '').replace('-', ''): value for key, value in record.items()}
+    for key in keys:
+        normalized = key.lower().replace('_', '').replace('-', '')
+        value = lower_map.get(normalized)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ''
 
 
-def _build_dhcp_lookup_script(ip: str) -> str:
-    address = _ps_single_quote(ip)
-    return (
-        f"$lease = Get-DhcpServerv4Lease -IPAddress '{address}' -ErrorAction SilentlyContinue | Select-Object -First 1; "
-        "if ($lease) { $lease.IPAddress.ToString() }"
-    )
+def _parse_ipv4(value: str) -> Optional[ipaddress.IPv4Address]:
+    try:
+        ip = ipaddress.ip_address(str(value).strip())
+    except ValueError:
+        return None
+    if ip.version != 4:
+        return None
+    return ip
 
 
-def _dhcp_command(ip: str, dhcp_server: str, username: str = '', password: str = '', domain: str = '') -> List[str]:
-    server = _ps_single_quote(dhcp_server)
-    remote_script = _ps_single_quote(_build_dhcp_lookup_script(ip))
+def _range_from_record(record: Dict[str, Any], source: str) -> Optional[DhcpRange]:
+    start_text = _first_value(record, ['StartRange', 'Start', 'RangeStart', 'StartAddress', 'From'])
+    end_text = _first_value(record, ['EndRange', 'End', 'RangeEnd', 'EndAddress', 'To'])
+    name = _first_value(record, ['Name', 'ScopeName', 'ScopeId', 'Subnet', 'Network'])
 
-    if username and password:
-        qualified_user = f'{domain}\\{username}' if domain else username
-        user = _ps_single_quote(qualified_user)
-        secret = _ps_single_quote(password)
-        script = (
-            f"$secure = ConvertTo-SecureString '{secret}' -AsPlainText -Force; "
-            f"$cred = [System.Management.Automation.PSCredential]::new('{user}', $secure); "
-            f"Invoke-Command -ComputerName '{server}' -Credential $cred "
-            f"-ScriptBlock ([scriptblock]::Create('{remote_script}'))"
-        )
+    if not start_text or not end_text:
+        cidr_text = _first_value(record, ['CIDR', 'Cidr', 'NetworkCidr', 'Prefix'])
+        if cidr_text:
+            try:
+                network = ipaddress.ip_network(cidr_text, strict=False)
+            except ValueError:
+                return None
+            if network.version != 4:
+                return None
+            return DhcpRange(network.network_address, network.broadcast_address, source=source, name=name or str(network))
+        return None
+
+    start = _parse_ipv4(start_text)
+    end = _parse_ipv4(end_text)
+    if start is None or end is None:
+        return None
+    if int(start) > int(end):
+        start, end = end, start
+    return DhcpRange(start, end, source=source, name=name)
+
+
+def _json_records(data: Any) -> List[Dict[str, Any]]:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        for key in ('scopes', 'ranges', 'dhcp_ranges', 'DhcpRanges', 'Scopes'):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        return [data]
+    return []
+
+
+def _load_dhcp_ranges_from_file(path: Path) -> List[DhcpRange]:
+    suffix = path.suffix.lower()
+    ranges: List[DhcpRange] = []
+    if suffix == '.json':
+        data = json.loads(path.read_text(encoding='utf-8-sig'))
+        for record in _json_records(data):
+            parsed = _range_from_record(record, path.name)
+            if parsed:
+                ranges.append(parsed)
+    elif suffix == '.csv':
+        with path.open('r', encoding='utf-8-sig', newline='') as fp:
+            for record in csv.DictReader(fp):
+                parsed = _range_from_record(record, path.name)
+                if parsed:
+                    ranges.append(parsed)
+    return ranges
+
+
+def load_dhcp_ranges(reference_path: str) -> List[DhcpRange]:
+    raw = str(reference_path or '').strip().strip('"')
+    if not raw:
+        return []
+    path = Path(raw).expanduser()
+    if not path.exists():
+        return []
+
+    files: List[Path]
+    if path.is_dir():
+        files = sorted([*path.glob('*.csv'), *path.glob('*.json')])
     else:
-        script = (
-            f"Invoke-Command -ComputerName '{server}' "
-            f"-ScriptBlock ([scriptblock]::Create('{remote_script}'))"
-        )
+        files = [path]
 
-    return ['powershell', '-NoProfile', '-Command', script]
+    ranges: List[DhcpRange] = []
+    for file_path in files:
+        try:
+            ranges.extend(_load_dhcp_ranges_from_file(file_path))
+        except Exception:
+            continue
+    return ranges
 
 
 def dhcp_check(
     row: StandardRow,
     ip_kind: str,
-    dhcp_server: str,
+    reference_path: str,
     username: str = '',
     password: str = '',
     domain: str = '',
 ) -> List[str]:
+    del username, password, domain
     if ip_kind != 'ip':
         return []
-    if not dhcp_server:
-        return [f'{row.userID}: DHCPサーバー設定が未設定のため、DHCP対象か手動確認してください。']
+    if not reference_path:
+        return [jp_item(row.userID, 'DHCP参照未設定', f'IP={row.IP}, DHCP範囲内か手動確認')]
 
-    try:
-        completed = subprocess.run(
-            _dhcp_command(row.IP, dhcp_server, username, password, domain),
-            capture_output=True,
-            text=True,
-            timeout=45,
-            check=False,
-        )
-    except Exception as exc:
-        return [f'{row.userID}: DHCP確認を実行できませんでした。手動確認してください。詳細: {exc}']
+    ip = _parse_ipv4(row.IP)
+    if ip is None:
+        return []
 
-    if completed.returncode != 0:
-        detail = ((completed.stderr or '').strip() or (completed.stdout or '').strip())
-        if 'Access is denied' in detail or 'アクセスが拒否' in detail:
-            return [
-                f'{row.userID}: DHCP確認に失敗しました。{dhcp_server} への PowerShell リモート実行権限、'
-                'または DHCP 読み取り権限が不足している可能性があります。手動確認してください。'
-            ]
-        return [f'{row.userID}: DHCP確認に失敗しました。手動確認してください。詳細: {detail}']
-    if (completed.stdout or '').strip():
-        return [f'{row.userID}: 対象IP {row.IP} はDHCPリース対象の可能性があります。申請者へ固定IPか確認してください。']
+    reference = Path(str(reference_path).strip().strip('"')).expanduser()
+    if not reference.exists():
+        return [jp_item(row.userID, 'DHCP参照ファイルなし', f'path={reference_path}, IP={row.IP}, DHCP範囲内か手動確認')]
+
+    ranges = load_dhcp_ranges(reference_path)
+    if not ranges:
+        return [jp_item(row.userID, 'DHCP範囲読み取り不可', f'path={reference_path}, IP={row.IP}, DHCP範囲内か手動確認')]
+
+    for dhcp_range in ranges:
+        if dhcp_range.contains(ip):
+            return [jp_item(row.userID, 'DHCP範囲内', f'IP={row.IP}, range={dhcp_range.label()}, 固定IPか申請者へ確認')]
     return []
 
 
@@ -245,14 +334,14 @@ def ad_user_check(user_id: str, required_group: str) -> tuple[List[str], List[st
             check=False,
         )
     except Exception as exc:
-        blockers.append(f'{user_id}: net user /domain を実行できませんでした。詳細: {exc}')
+        blockers.append(f'{user_id}: Could not run net user /domain. Detail: {exc}')
         return blockers, confirmations
 
     output = (completed.stdout or '') + '\n' + (completed.stderr or '')
     if completed.returncode != 0:
-        blockers.append(f'{user_id}: 対象アカウントが存在しない、または確認できません。申請者へアカウントを確認してください。')
+        blockers.append(f'{user_id}: Target account does not exist or could not be verified. Please confirm the account with the applicant.')
         return blockers, confirmations
 
     if required_group and required_group not in output:
-        confirmations.append(f'{user_id}: 対象アカウントが {required_group} に所属していません。申請者または管理者へ確認してください。')
+        confirmations.append(jp_item(user_id, '権限グループ未所属', f'group={required_group}, 申請者または管理者へ確認'))
     return blockers, confirmations

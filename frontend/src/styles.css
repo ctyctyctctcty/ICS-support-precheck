@@ -1,0 +1,284 @@
+:root {
+  color: #202322;
+  background: #f7f8f5;
+  font-family: "Segoe UI", "Yu Gothic UI", "Meiryo", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.shell {
+  width: min(1120px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 32px 0 48px;
+}
+
+.topline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 28px;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.eyebrow {
+  margin: 0 0 10px;
+  color: #47665c;
+  font-weight: 700;
+}
+
+h1,
+h2,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  margin-bottom: 12px;
+  line-height: 1.15;
+}
+
+h2 {
+  margin-bottom: 8px;
+  line-height: 1.25;
+}
+
+.lead {
+  max-width: 720px;
+  margin-bottom: 0;
+  color: #52605b;
+}
+
+.workflow {
+  width: 100%;
+  max-width: 220px;
+  justify-self: end;
+}
+
+.upload-area {
+  min-height: 210px;
+  border: 2px dashed #7b9189;
+  border-radius: 8px;
+  background: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 28px;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.upload-area.active {
+  border-color: #26745f;
+  background: #eef7f2;
+}
+
+.upload-area p {
+  margin-bottom: 0;
+  color: #52605b;
+}
+
+.file-button,
+.primary,
+.file-list button,
+.link-button {
+  border: 1px solid #26745f;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.file-button,
+.primary {
+  background: #26745f;
+  color: #ffffff;
+  padding: 12px 18px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.file-button input {
+  display: none;
+}
+
+.primary:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.queue,
+.results,
+.folders {
+  margin-top: 28px;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.link-button {
+  background: transparent;
+  color: #26745f;
+  padding: 8px 12px;
+}
+
+.file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.file-list li,
+.result-row,
+.folders dl div {
+  background: #ffffff;
+  border: 1px solid #d8dfdb;
+  border-radius: 8px;
+}
+
+.file-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  padding: 12px 14px;
+}
+
+.file-list span,
+.file-name,
+.folder-path,
+.downloads a,
+.folders dd {
+  overflow-wrap: anywhere;
+}
+
+.file-list button {
+  background: #ffffff;
+  color: #52605b;
+  padding: 6px 10px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 22px;
+  flex-wrap: wrap;
+}
+
+.error-text {
+  margin: 0;
+  color: #a33a32;
+  font-weight: 700;
+}
+
+.results h2,
+.folders h2 {
+  margin-bottom: 14px;
+}
+
+.result-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
+  gap: 18px;
+  padding: 16px;
+  margin-bottom: 12px;
+  border-left-width: 6px;
+}
+
+.result-row[data-status="network_ready"] {
+  border-left-color: #26745f;
+}
+
+.result-row[data-status="needs_confirmation"] {
+  border-left-color: #8b6f13;
+}
+
+.result-row[data-status="error"] {
+  border-left-color: #a33a32;
+}
+
+.file-name {
+  margin-bottom: 6px;
+  font-weight: 800;
+}
+
+.status-line {
+  margin-bottom: 6px;
+  color: #202322;
+}
+
+.folder-path {
+  margin-bottom: 0;
+  color: #52605b;
+}
+
+.downloads {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.downloads a {
+  color: #26745f;
+  font-weight: 700;
+}
+
+.folders dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.folders dl div {
+  padding: 14px;
+}
+
+.folders dt {
+  margin-bottom: 6px;
+  font-weight: 800;
+}
+
+.folders dd {
+  margin: 0;
+  color: #52605b;
+}
+
+@media (max-width: 760px) {
+  .shell {
+    width: min(100% - 20px, 1120px);
+    padding-top: 20px;
+  }
+
+  .topline,
+  .upload-area,
+  .result-row,
+  .folders dl {
+    grid-template-columns: 1fr;
+  }
+
+  .upload-area {
+    align-items: stretch;
+  }
+
+  .workflow {
+    justify-self: start;
+    max-width: 170px;
+  }
+}

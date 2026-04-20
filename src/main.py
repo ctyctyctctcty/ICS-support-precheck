@@ -43,12 +43,12 @@ def validate_rows(rows: List[StandardRow], internet_aliases: List[str]) -> Tuple
     for index, row in enumerate(rows, start=1):
         valid, row_blockers = validate_row(row, internet_aliases)
         if row_blockers:
-            blockers.extend(f'行{index}: {item}' for item in row_blockers)
+            blockers.extend(f'Row {index}: {item}' for item in row_blockers)
             continue
         if valid is not None:
             valid_rows.append(valid)
     if not valid_rows and not blockers:
-        blockers.append('申請データ行を取得できませんでした。')
+        blockers.append('No application data rows could be extracted.')
     return valid_rows, blockers, notes
 
 
@@ -60,15 +60,12 @@ def run_checks(rows: List[StandardRow], settings: Dict, env: Dict[str, str]) -> 
     result = CheckResult(rows=rows)
     internet_aliases = settings.get('internet_aliases', [])
     required_group = _env_value(env, 'REQUIRED_SECURITY_GROUP', settings.get('required_security_group', ''))
-    dhcp_server = _env_value(env, 'DHCP_SERVER')
-    dhcp_username = _env_value(env, 'DHCP_QUERY_USERNAME')
-    dhcp_password = _env_value(env, 'DHCP_QUERY_PASSWORD')
-    dhcp_domain = _env_value(env, 'DHCP_QUERY_DOMAIN')
+    dhcp_reference_path = _env_value(env, 'DHCP_REFERENCE_PATH')
 
     for row in rows:
         normalized_ip, ip_kind, ip_error = normalize_ip_value(row.IP, internet_aliases)
         if ip_error or not normalized_ip or not ip_kind:
-            result.blockers.append(f'{row.userID}: {ip_error or "IPアドレスを確認できません。"}')
+            result.blockers.append(f'{row.userID}: {ip_error or "IP address could not be verified."}')
             continue
         row.IP = normalized_ip
 
@@ -79,7 +76,7 @@ def run_checks(rows: List[StandardRow], settings: Dict, env: Dict[str, str]) -> 
             continue
 
         result.confirmations.extend(reverse_dns_check(row, ip_kind))
-        result.confirmations.extend(dhcp_check(row, ip_kind, dhcp_server, dhcp_username, dhcp_password, dhcp_domain))
+        result.confirmations.extend(dhcp_check(row, ip_kind, dhcp_reference_path))
 
     return result
 
@@ -174,7 +171,7 @@ def main() -> None:
             result = process_file(source_path, settings, env, dirs)
         except Exception as exc:
             target_dir = dirs['error']
-            write_error_report(source_path, target_dir, [f'処理中に予期しないエラーが発生しました: {exc}'], env)
+            write_error_report(source_path, target_dir, [f'Unexpected error occurred while processing: {exc}'], env)
             move_source(source_path, target_dir)
             result = 'error'
         stats[result] += 1
@@ -185,5 +182,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
-
