@@ -34,11 +34,19 @@ The web UI lets support team members upload `.xlsx` files from a browser. The Fa
 - `data/needs_confirmation`
 - `data/error`
 
+For normal Windows users, double-click:
+
+```text
+Launch ICS Support Precheck.bat
+```
+
+It starts the local web service on port `8010` and opens the browser automatically. If the service is already running, it only opens the browser.
+
 Backend setup:
 
 ```powershell
 py -m pip install -r requirements.txt
-py -m uvicorn backend.app:app --reload --host 127.0.0.1 --port 8000
+py start_web.py
 ```
 
 Frontend setup:
@@ -55,10 +63,10 @@ Open `http://127.0.0.1:5173` and upload the applicant workbook. For a simple pro
 cd frontend
 npm run build
 cd ..
-py -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
+py start_web.py
 ```
 
-Then open `http://127.0.0.1:8000`.
+Then open `http://127.0.0.1:8010`.
 
 ## Test
 
@@ -138,3 +146,5 @@ Supported JSON can be either a list or an object with `scopes` / `ranges`:
 ```
 
 If an IP is inside a DHCP range, the output goes to `needs_confirmation` and asks support to confirm with the applicant that the IP is fixed/static.
+
+For DHCP/AD server-side monthly export scripts, see `forAD/`. Those scripts export DHCP scope ranges to a shared folder for this tool to read.
