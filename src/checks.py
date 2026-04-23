@@ -4,6 +4,7 @@ import csv
 import ipaddress
 import json
 import re
+import socket
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -156,34 +157,82 @@ def jp_item(user_id: str, summary: str, detail: str = '') -> str:
     return f'{prefix}{summary}'
 
 
-def reverse_dns_check(row: StandardRow, ip_kind: str) -> List[str]:
-    if ip_kind != 'ip' or not row.hostname.strip():
-        return []
+_NSLOOKUP_NAME_PATTERNS = (
+    re.compile(r'^\s*name\s*=\s*(.+?)\s*$', re.IGNORECASE),
+    re.compile(r'^\s*name\s*:\s*(.+?)\s*$', re.IGNORECASE),
+    re.compile(r'^\s*名前\s*:\s*(.+?)\s*$'),
+)
+
+
+def _extract_nslookup_names(output: str) -> List[str]:
+    names: List[str] = []
+    seen = set()
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        for pattern in _NSLOOKUP_NAME_PATTERNS:
+            match = pattern.match(line)
+            if not match:
+                continue
+            candidate = match.group(1).strip().rstrip('.')
+            if candidate and candidate.lower() not in seen:
+                names.append(candidate)
+                seen.add(candidate.lower())
+            break
+    return names
+
+
+def _reverse_lookup_names(ip: str) -> tuple[List[str], Optional[str]]:
+    names: List[str] = []
+    seen = set()
+
+    try:
+        primary_name, aliases, _ = socket.gethostbyaddr(ip)
+        for candidate in [primary_name, *aliases]:
+            normalized = str(candidate or '').strip().rstrip('.')
+            if normalized and normalized.lower() not in seen:
+                names.append(normalized)
+                seen.add(normalized.lower())
+    except Exception:
+        pass
 
     try:
         completed = subprocess.run(
-            ['nslookup', row.IP],
+            ['nslookup', ip],
             capture_output=True,
             text=True,
             timeout=15,
             check=False,
         )
     except Exception as exc:
-        return [jp_item(row.userID, '逆引き確認不可', f'IP={row.IP}, 手動確認, detail={exc}')]
+        return names, str(exc) if not names else None
 
     output = (completed.stdout or '') + '\n' + (completed.stderr or '')
+    parsed_names = _extract_nslookup_names(output)
+    for candidate in parsed_names:
+        if candidate.lower() not in seen:
+            names.append(candidate)
+            seen.add(candidate.lower())
+
+    if names:
+        return names, None
+
     if completed.returncode != 0:
-        return [jp_item(row.userID, '逆引き確認不可', f'IP={row.IP}, 申請ホスト名={row.hostname}, 手動確認')]
+        return [], f'nslookup rc={completed.returncode}'
+    return [], None
 
-    names = []
-    for line in output.splitlines():
-        if 'name =' in line.lower():
-            names.append(line.split('=', 1)[1].strip().rstrip('.'))
-        elif line.strip().lower().startswith('name:'):
-            names.append(line.split(':', 1)[1].strip().rstrip('.'))
 
+def reverse_dns_check(row: StandardRow, ip_kind: str) -> List[str]:
+    if ip_kind != 'ip' or not row.hostname.strip():
+        return []
+
+    names, lookup_error = _reverse_lookup_names(row.IP)
     if not names:
-        return [jp_item(row.userID, '逆引きホスト名なし', f'IP={row.IP}, 申請ホスト名={row.hostname}, 手動確認')]
+        detail = f'IP={row.IP}, 申請ホスト名={row.hostname}, 手動確認'
+        if lookup_error:
+            detail = f'{detail}, detail={lookup_error}'
+        return [jp_item(row.userID, '逆引きホスト名なし', detail)]
 
     requested = short_hostname(row.hostname)
     if any(short_hostname(name) == requested for name in names):
@@ -342,6 +391,9 @@ def ad_user_check(user_id: str, required_group: str) -> tuple[List[str], List[st
         blockers.append(f'{user_id}: Target account does not exist or could not be verified. Please confirm the account with the applicant.')
         return blockers, confirmations
 
-    if required_group and required_group not in output:
-        confirmations.append(jp_item(user_id, '権限グループ未所属', f'group={required_group}, 申請者または管理者へ確認'))
+    if required_group:
+        normalized_output = compact_text(output)
+        normalized_group = compact_text(required_group)
+        if normalized_group and normalized_group not in normalized_output:
+            confirmations.append(jp_item(user_id, '権限グループ未所属', f'group={required_group}, 申請者または管理者へ確認'))
     return blockers, confirmations
