@@ -9,8 +9,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
 
 from ai_client import draft_issue_reply, load_ai_config, model_candidates
-from checks import StandardRow, dhcp_check, load_dhcp_ranges, normalize_ip_value, validate_row
+from checks import StandardRow, dhcp_check, load_dhcp_ranges, normalize_ip_value, validate_dhcp_reference, validate_row
 from parser import parse_with_rules
+from reports import confirmation_message
 from xlsx_io import SheetData, read_workbook, write_standard_workbook
 
 
@@ -97,6 +98,55 @@ class CoreFlowTests(unittest.TestCase):
         self.assertEqual(len(hit), 1)
         self.assertEqual(miss, [])
 
+    def test_dhcp_check_ignores_excluded_range(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / 'dhcp_scopes.csv'
+            csv_path.write_text(
+                'RangeType,ScopeId,Name,StartRange,EndRange\n'
+                'scope,192.0.2.0,Office LAN,192.0.2.10,192.0.2.50\n'
+                'exclusion,192.0.2.0,Office LAN,192.0.2.20,192.0.2.25\n',
+                encoding='utf-8',
+            )
+            excluded = dhcp_check(StandardRow('user01', 'User', IP='192.0.2.22'), 'ip', tmp)
+            dynamic = dhcp_check(StandardRow('user02', 'User', IP='192.0.2.30'), 'ip', tmp)
+
+        self.assertEqual(excluded, [])
+        self.assertEqual(len(dynamic), 1)
+
+    def test_validate_dhcp_reference_flags_stale_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / 'dhcp_scopes.csv'
+            csv_path.write_text(
+                'ScopeId,Name,StartRange,EndRange\n'
+                '192.0.2.0,Office LAN,192.0.2.10,192.0.2.50\n',
+                encoding='utf-8',
+            )
+            old_time = csv_path.stat().st_mtime - (40 * 86400)
+            import os
+            os.utime(csv_path, (old_time, old_time))
+            state = validate_dhcp_reference(tmp, max_age_days=35)
+
+        self.assertTrue(any('期限切れ' in issue for issue in state.issues))
+        self.assertEqual(len(state.ranges), 1)
+
+    def test_validate_dhcp_reference_reads_status_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / 'dhcp_scopes.csv'
+            csv_path.write_text(
+                'ScopeId,Name,StartRange,EndRange\n'
+                '192.0.2.0,Office LAN,192.0.2.10,192.0.2.50\n',
+                encoding='utf-8',
+            )
+            status_path = Path(tmp) / 'dhcp_export_status.json'
+            status_path.write_text(
+                '{"success": false, "scope_count": 0, "error": "scope export failed", "data_files": ["dhcp_scopes.csv"], "exported_at": "2026-04-27 06:00:00"}',
+                encoding='utf-8',
+            )
+            state = validate_dhcp_reference(tmp, max_age_days=35)
+
+        self.assertTrue(any('failure' in issue for issue in state.issues))
+        self.assertTrue(any('zero scopes' in issue for issue in state.issues))
+
     def test_openrouter_config_defaults_to_confirmed_models(self) -> None:
         config = load_ai_config({
             'AI_PROVIDER': 'openrouter',
@@ -115,6 +165,16 @@ class CoreFlowTests(unittest.TestCase):
 
     def test_draft_issue_reply_without_key_uses_no_network(self) -> None:
         self.assertIsNone(draft_issue_reply('request.xlsx', ['IP address is missing.'], 'error', {'AI_PROVIDER': 'openrouter'}))
+
+    def test_confirmation_message_uses_support_friendly_wording(self) -> None:
+        message = confirmation_message('request.xlsx', [
+            'DHCP範囲内 (IP=192.0.2.20, range=Office LAN 192.0.2.10-192.0.2.50, 固定IPか申請者へ確認)',
+            'ホスト名一致しない (申請=server01, DNS=server02)',
+        ])
+
+        self.assertIn('network team へ連携する前に、以下の内容を確認してください。', message)
+        self.assertIn('固定IPとして利用してよいか申請者へ確認してください。', message)
+        self.assertIn('接続先サーバー名が正しいか確認してください。', message)
 
 
 if __name__ == '__main__':

@@ -6,6 +6,7 @@ import json
 import re
 import socket
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -13,6 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 ACCOUNT_RE = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
 HOSTNAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9.-]{0,253}$')
+DHCP_STATUS_FILE = 'dhcp_export_status.json'
 
 
 @dataclass
@@ -57,6 +59,7 @@ class DhcpRange:
     end: ipaddress.IPv4Address
     source: str = ''
     name: str = ''
+    range_type: str = 'scope'
 
     def contains(self, ip: ipaddress.IPv4Address) -> bool:
         return int(self.start) <= int(ip) <= int(self.end)
@@ -66,9 +69,19 @@ class DhcpRange:
         if self.name:
             label_parts.append(self.name)
         label_parts.append(f'{self.start}-{self.end}')
+        if self.range_type and self.range_type != 'scope':
+            label_parts.append(self.range_type)
         if self.source:
             label_parts.append(f'source: {self.source}')
         return ' / '.join(label_parts)
+
+
+@dataclass
+class DhcpReferenceState:
+    ranges: List[DhcpRange] = field(default_factory=list)
+    exclusions: List[DhcpRange] = field(default_factory=list)
+    issues: List[str] = field(default_factory=list)
+    latest_export_label: str = ''
 
 
 def compact_text(value: str) -> str:
@@ -260,10 +273,21 @@ def _parse_ipv4(value: str) -> Optional[ipaddress.IPv4Address]:
     return ip
 
 
-def _range_from_record(record: Dict[str, Any], source: str) -> Optional[DhcpRange]:
+def _range_type_from_record(record: Dict[str, Any], default: str = 'scope') -> str:
+    value = _first_value(record, ['RangeType', 'Type', 'Kind', 'RecordType'])
+    text = compact_text(value)
+    if text in {'exclusion', 'excluded', 'exclude', '除外'}:
+        return 'exclusion'
+    if text in {'scope', 'range', 'dhcp'}:
+        return 'scope'
+    return default
+
+
+def _range_from_record(record: Dict[str, Any], source: str, default_type: str = 'scope') -> Optional[DhcpRange]:
     start_text = _first_value(record, ['StartRange', 'Start', 'RangeStart', 'StartAddress', 'From'])
     end_text = _first_value(record, ['EndRange', 'End', 'RangeEnd', 'EndAddress', 'To'])
     name = _first_value(record, ['Name', 'ScopeName', 'ScopeId', 'Subnet', 'Network'])
+    range_type = _range_type_from_record(record, default_type)
 
     if not start_text or not end_text:
         cidr_text = _first_value(record, ['CIDR', 'Cidr', 'NetworkCidr', 'Prefix'])
@@ -274,7 +298,7 @@ def _range_from_record(record: Dict[str, Any], source: str) -> Optional[DhcpRang
                 return None
             if network.version != 4:
                 return None
-            return DhcpRange(network.network_address, network.broadcast_address, source=source, name=name or str(network))
+            return DhcpRange(network.network_address, network.broadcast_address, source=source, name=name or str(network), range_type=range_type)
         return None
 
     start = _parse_ipv4(start_text)
@@ -283,7 +307,7 @@ def _range_from_record(record: Dict[str, Any], source: str) -> Optional[DhcpRang
         return None
     if int(start) > int(end):
         start, end = end, start
-    return DhcpRange(start, end, source=source, name=name)
+    return DhcpRange(start, end, source=source, name=name, range_type=range_type)
 
 
 def _json_records(data: Any) -> List[Dict[str, Any]]:
@@ -298,18 +322,93 @@ def _json_records(data: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def _json_records_by_type(data: Any) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if isinstance(data, dict):
+        scope_records: List[Dict[str, Any]] = []
+        exclusion_records: List[Dict[str, Any]] = []
+        for key in ('scopes', 'ranges', 'dhcp_ranges', 'DhcpRanges', 'Scopes'):
+            value = data.get(key)
+            if isinstance(value, list):
+                scope_records.extend(item for item in value if isinstance(item, dict))
+        for key in ('exclusions', 'excluded_ranges', 'Exclusions', 'ExcludedRanges'):
+            value = data.get(key)
+            if isinstance(value, list):
+                exclusion_records.extend(item for item in value if isinstance(item, dict))
+        if scope_records or exclusion_records:
+            return scope_records, exclusion_records
+    return _json_records(data), []
+
+
+def _candidate_dhcp_files(path: Path) -> List[Path]:
+    if path.is_dir():
+        return sorted([
+            file_path
+            for file_path in [*path.glob('*.csv'), *path.glob('*.json')]
+            if file_path.name.lower() != DHCP_STATUS_FILE
+        ])
+    return [path]
+
+
+def _file_is_stale(path: Path, max_age_days: int) -> bool:
+    try:
+        age_seconds = max(0.0, time.time() - path.stat().st_mtime)
+    except OSError:
+        return True
+    return age_seconds > max_age_days * 86400
+
+
+def _validate_status_file(path: Path, data_files: List[Path], max_age_days: int) -> tuple[List[str], str]:
+    issues: List[str] = []
+    latest_export_label = ''
+    if not path.exists():
+        return issues, latest_export_label
+
+    try:
+        status = json.loads(path.read_text(encoding='utf-8-sig'))
+    except Exception as exc:
+        return [f'DHCP status file could not be read: {path.name} ({exc})'], latest_export_label
+
+    exported_at = str(status.get('exported_at', '') or '').strip()
+    scope_count = int(status.get('scope_count', 0) or 0)
+    success = bool(status.get('success'))
+    latest_export_label = exported_at or path.name
+
+    if not success:
+        error_text = str(status.get('error', '') or 'unknown export error')
+        issues.append(f'DHCP export status indicates failure: {error_text}')
+    if scope_count <= 0:
+        issues.append('DHCP export status indicates zero scopes.')
+
+    file_names = [str(name).strip() for name in status.get('data_files', []) if str(name).strip()]
+    if file_names:
+        existing_names = {file_path.name for file_path in data_files}
+        missing = [name for name in file_names if name not in existing_names]
+        if missing:
+            issues.append(f'DHCP export status references missing files: {", ".join(missing)}')
+
+    if _file_is_stale(path, max_age_days):
+        issues.append(f'DHCP export status is older than {max_age_days} days.')
+    return issues, latest_export_label
+
+
 def _load_dhcp_ranges_from_file(path: Path) -> List[DhcpRange]:
     suffix = path.suffix.lower()
     ranges: List[DhcpRange] = []
     if suffix == '.json':
         data = json.loads(path.read_text(encoding='utf-8-sig'))
-        for record in _json_records(data):
-            parsed = _range_from_record(record, path.name)
+        scope_records, exclusion_records = _json_records_by_type(data)
+        for record in scope_records:
+            parsed = _range_from_record(record, path.name, 'scope')
+            if parsed:
+                ranges.append(parsed)
+        for record in exclusion_records:
+            parsed = _range_from_record(record, path.name, 'exclusion')
             if parsed:
                 ranges.append(parsed)
     elif suffix == '.csv':
         with path.open('r', encoding='utf-8-sig', newline='') as fp:
-            for record in csv.DictReader(fp):
+            reader = csv.DictReader(fp)
+            for record in reader:
                 parsed = _range_from_record(record, path.name)
                 if parsed:
                     ranges.append(parsed)
@@ -324,25 +423,83 @@ def load_dhcp_ranges(reference_path: str) -> List[DhcpRange]:
     if not path.exists():
         return []
 
-    files: List[Path]
-    if path.is_dir():
-        files = sorted([*path.glob('*.csv'), *path.glob('*.json')])
-    else:
-        files = [path]
-
+    files = _candidate_dhcp_files(path)
     ranges: List[DhcpRange] = []
     for file_path in files:
         try:
-            ranges.extend(_load_dhcp_ranges_from_file(file_path))
+            ranges.extend(item for item in _load_dhcp_ranges_from_file(file_path) if item.range_type != 'exclusion')
         except Exception:
             continue
     return ranges
 
 
+def load_dhcp_reference_ranges(reference_path: str) -> tuple[List[DhcpRange], List[DhcpRange]]:
+    raw = str(reference_path or '').strip().strip('"')
+    if not raw:
+        return [], []
+    path = Path(raw).expanduser()
+    if not path.exists():
+        return [], []
+
+    scopes: List[DhcpRange] = []
+    exclusions: List[DhcpRange] = []
+    for file_path in _candidate_dhcp_files(path):
+        try:
+            for item in _load_dhcp_ranges_from_file(file_path):
+                if item.range_type == 'exclusion':
+                    exclusions.append(item)
+                else:
+                    scopes.append(item)
+        except Exception:
+            continue
+    return scopes, exclusions
+
+
+def validate_dhcp_reference(reference_path: str, max_age_days: int = 35) -> DhcpReferenceState:
+    raw = str(reference_path or '').strip().strip('"')
+    if not raw:
+        return DhcpReferenceState(issues=['DHCP参照未設定 (DHCP範囲確認は手動対応)'])
+
+    path = Path(raw).expanduser()
+    if not path.exists():
+        return DhcpReferenceState(issues=[f'DHCP参照ファイルなし (path={reference_path})'])
+
+    files = _candidate_dhcp_files(path)
+    if not files:
+        return DhcpReferenceState(issues=['DHCP参照ファイルなし (CSV/JSONが見つかりません)'])
+
+    issues: List[str] = []
+    if all(_file_is_stale(file_path, max_age_days) for file_path in files):
+        issues.append(f'DHCP参照データ期限切れ ({max_age_days}日超)')
+
+    status_path = path / DHCP_STATUS_FILE if path.is_dir() else path.with_name(DHCP_STATUS_FILE)
+    status_issues, latest_export_label = _validate_status_file(status_path, files, max_age_days)
+    issues.extend(status_issues)
+
+    ranges, exclusions = load_dhcp_reference_ranges(reference_path)
+    if not ranges:
+        issues.append('DHCP範囲読み取り不可 (有効なStartRange/EndRangeがありません)')
+    elif len(ranges) < len(files):
+        issues.append('DHCP参照データ一部読取失敗 (一部ファイルを確認してください)')
+
+    return DhcpReferenceState(ranges=ranges, exclusions=exclusions, issues=issues, latest_export_label=latest_export_label)
+
+
+def dhcp_reference_issues(reference_path: str, max_age_days: int = 35) -> List[str]:
+    state = validate_dhcp_reference(reference_path, max_age_days=max_age_days)
+    issues: List[str] = []
+    for item in state.issues:
+        detail = item if not state.latest_export_label else f'{item}, latest={state.latest_export_label}'
+        issues.append(jp_item('', 'DHCP参照異常', detail))
+    return issues
+
+
 def dhcp_check(
     row: StandardRow,
     ip_kind: str,
-    reference_path: str,
+    reference_path: str = '',
+    ranges: Optional[Sequence[DhcpRange]] = None,
+    exclusions: Optional[Sequence[DhcpRange]] = None,
     username: str = '',
     password: str = '',
     domain: str = '',
@@ -350,22 +507,21 @@ def dhcp_check(
     del username, password, domain
     if ip_kind != 'ip':
         return []
-    if not reference_path:
-        return [jp_item(row.userID, 'DHCP参照未設定', f'IP={row.IP}, DHCP範囲内か手動確認')]
 
     ip = _parse_ipv4(row.IP)
     if ip is None:
         return []
 
-    reference = Path(str(reference_path).strip().strip('"')).expanduser()
-    if not reference.exists():
-        return [jp_item(row.userID, 'DHCP参照ファイルなし', f'path={reference_path}, IP={row.IP}, DHCP範囲内か手動確認')]
+    effective_ranges = list(ranges or [])
+    effective_exclusions = list(exclusions or [])
+    if not effective_ranges and reference_path:
+        effective_ranges, effective_exclusions = load_dhcp_reference_ranges(reference_path)
 
-    ranges = load_dhcp_ranges(reference_path)
-    if not ranges:
-        return [jp_item(row.userID, 'DHCP範囲読み取り不可', f'path={reference_path}, IP={row.IP}, DHCP範囲内か手動確認')]
+    for excluded_range in effective_exclusions:
+        if excluded_range.contains(ip):
+            return []
 
-    for dhcp_range in ranges:
+    for dhcp_range in effective_ranges:
         if dhcp_range.contains(ip):
             return [jp_item(row.userID, 'DHCP範囲内', f'IP={row.IP}, range={dhcp_range.label()}, 固定IPか申請者へ確認')]
     return []

@@ -37,6 +37,65 @@ function Get-RequiredValue {
     return $value
 }
 
+function Write-StatusFile {
+    param(
+        [string]$Destination,
+        [hashtable]$Status
+    )
+
+    $statusPath = Join-Path $Destination "dhcp_export_status.json"
+    $Status | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $statusPath -Encoding UTF8
+}
+
+function Assert-ScopeRows {
+    param([object[]]$Rows)
+
+    if (-not $Rows -or $Rows.Count -le 0) {
+        throw "No DHCP IPv4 scopes were found on this server."
+    }
+
+    foreach ($row in $Rows) {
+        foreach ($field in @("ScopeId", "Name", "StartRange", "EndRange")) {
+            $value = [string]$row.$field
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                throw "DHCP export validation failed: missing field $field."
+            }
+        }
+
+        $start = [System.Net.IPAddress]::Parse([string]$row.StartRange).GetAddressBytes()
+        $end = [System.Net.IPAddress]::Parse([string]$row.EndRange).GetAddressBytes()
+        $startNum = [BitConverter]::ToUInt32(($start[3], $start[2], $start[1], $start[0]), 0)
+        $endNum = [BitConverter]::ToUInt32(($end[3], $end[2], $end[1], $end[0]), 0)
+        if ($startNum -gt $endNum) {
+            throw "DHCP export validation failed: StartRange is greater than EndRange for scope $($row.ScopeId)."
+        }
+    }
+}
+
+function Assert-RangeRows {
+    param(
+        [object[]]$Rows,
+        [string]$Label
+    )
+
+    foreach ($row in $Rows) {
+        foreach ($field in @("ScopeId", "StartRange", "EndRange")) {
+            $value = [string]$row.$field
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                throw "$Label validation failed: missing field $field."
+            }
+        }
+
+        $start = [System.Net.IPAddress]::Parse([string]$row.StartRange).GetAddressBytes()
+        $end = [System.Net.IPAddress]::Parse([string]$row.EndRange).GetAddressBytes()
+        $startNum = [BitConverter]::ToUInt32(($start[3], $start[2], $start[1], $start[0]), 0)
+        $endNum = [BitConverter]::ToUInt32(($end[3], $end[2], $end[1], $end[0]), 0)
+        if ($startNum -gt $endNum) {
+            throw "$Label validation failed: StartRange is greater than EndRange for scope $($row.ScopeId)."
+        }
+    }
+}
+
 $envValues = Read-DotEnv -Path $EnvPath
 $destination = Get-RequiredValue -Values $envValues -Key "EXPORT_DESTINATION"
 $format = [string]$envValues["EXPORT_FORMAT"]
@@ -59,47 +118,93 @@ if (-not (Test-Path -LiteralPath $destination)) {
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
 }
 
-Import-Module DhcpServer -ErrorAction Stop
-
 $exportedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $serverName = $env:COMPUTERNAME
-
-$scopes = Get-DhcpServerv4Scope | Sort-Object ScopeId | ForEach-Object {
-    [pscustomobject]@{
-        ScopeId = $_.ScopeId.ToString()
-        Name = $_.Name
-        StartRange = $_.StartRange.ToString()
-        EndRange = $_.EndRange.ToString()
-        SubnetMask = $_.SubnetMask.ToString()
-        State = $_.State.ToString()
-        LeaseDuration = $_.LeaseDuration.ToString()
-        ExportedAt = $exportedAt
-        ServerName = $serverName
-    }
-}
-
-if (-not $scopes -or $scopes.Count -eq 0) {
-    throw "No DHCP IPv4 scopes were found on this server."
-}
-
 $written = @()
-if ($format -in @("csv", "both")) {
-    $csvPath = Join-Path $destination "$prefix`_$timestamp.csv"
-    $scopes | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
-    $written += $csvPath
-}
 
-if ($format -in @("json", "both")) {
-    $jsonPath = Join-Path $destination "$prefix`_$timestamp.json"
-    [pscustomobject]@{
+try {
+    Import-Module DhcpServer -ErrorAction Stop
+
+    $scopes = @(Get-DhcpServerv4Scope | Sort-Object ScopeId | ForEach-Object {
+        [pscustomobject]@{
+            RangeType = "scope"
+            ScopeId = $_.ScopeId.ToString()
+            Name = $_.Name
+            StartRange = $_.StartRange.ToString()
+            EndRange = $_.EndRange.ToString()
+            SubnetMask = $_.SubnetMask.ToString()
+            State = $_.State.ToString()
+            LeaseDuration = $_.LeaseDuration.ToString()
+            ExportedAt = $exportedAt
+            ServerName = $serverName
+        }
+    })
+
+    Assert-ScopeRows -Rows $scopes
+
+    $exclusions = @()
+    foreach ($scope in $scopes) {
+        $scopeId = $scope.ScopeId
+        $scopeExclusions = @(Get-DhcpServerv4ExclusionRange -ScopeId $scopeId -ErrorAction SilentlyContinue)
+        foreach ($excluded in $scopeExclusions) {
+            $exclusions += [pscustomobject]@{
+                RangeType = "exclusion"
+                ScopeId = $scopeId
+                Name = $scope.Name
+                StartRange = $excluded.StartRange.ToString()
+                EndRange = $excluded.EndRange.ToString()
+                SubnetMask = $scope.SubnetMask
+                State = ""
+                LeaseDuration = ""
+                ExportedAt = $exportedAt
+                ServerName = $serverName
+            }
+        }
+    }
+    Assert-RangeRows -Rows $exclusions -Label "DHCP exclusion export"
+
+    $allRows = @($scopes) + @($exclusions)
+
+    if ($format -in @("csv", "both")) {
+        $csvPath = Join-Path $destination "$prefix`_$timestamp.csv"
+        $allRows | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+        $written += $csvPath
+    }
+
+    if ($format -in @("json", "both")) {
+        $jsonPath = Join-Path $destination "$prefix`_$timestamp.json"
+        [pscustomobject]@{
+            exported_at = $exportedAt
+            server_name = $serverName
+            scopes = $scopes
+            exclusions = $exclusions
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
+        $written += $jsonPath
+    }
+
+    Write-StatusFile -Destination $destination -Status @{
+        success = $true
         exported_at = $exportedAt
         server_name = $serverName
-        scopes = $scopes
-    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $jsonPath -Encoding UTF8
-    $written += $jsonPath
-}
+        scope_count = $scopes.Count
+        exclusion_count = $exclusions.Count
+        data_files = @($written | ForEach-Object { [System.IO.Path]::GetFileName($_) })
+    }
 
-foreach ($path in $written) {
-    Write-Host "Wrote $path"
+    foreach ($path in $written) {
+        Write-Host "Wrote $path"
+    }
+}
+catch {
+    Write-StatusFile -Destination $destination -Status @{
+        success = $false
+        exported_at = $exportedAt
+        server_name = $serverName
+        scope_count = 0
+        exclusion_count = 0
+        data_files = @()
+        error = $_.Exception.Message
+    }
+    throw
 }

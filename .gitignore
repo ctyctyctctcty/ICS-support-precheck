@@ -3,6 +3,7 @@ forAD/.env
 __pycache__/
 *.pyc
 .venv/
+logs/
 
 frontend/node_modules/
 frontend/dist/

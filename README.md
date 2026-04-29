@@ -42,6 +42,42 @@ Launch ICS Support Precheck.bat
 
 It starts the local web service on port `8010` and opens the browser automatically. If the service is already running, it only opens the browser.
 
+For Hyper-V or a shared internal server, run the same launcher on the server. The backend listens on `0.0.0.0:8010`, so support users can open it from their own PCs:
+
+```text
+http://SERVER_IP:8010
+```
+
+Users still upload files from their own PC in the browser and download generated files through the browser. They do not need Python, Node.js, or this repository installed locally.
+
+### Keep the web service running after logout
+
+On the Hyper-V / shared server, install the startup task once:
+
+```text
+Install Startup Service.bat
+```
+
+Run it as Administrator when Windows asks. It registers a Windows Task Scheduler task named `ICS Support Precheck Web`, runs it as `SYSTEM`, starts it at boot, and keeps the web service running even after you log out of the Hyper-V console.
+
+After installation, support users can keep using:
+
+```text
+http://SERVER_IP:8010
+```
+
+Useful server-side commands:
+
+```text
+Check Startup Service.bat
+```
+
+```text
+Uninstall Startup Service.bat
+```
+
+Logs are written to `logs\web-service.log` and `logs\uvicorn.log`. If the task cannot find Python, install Python for all users on the server or set a machine-level `ICS_PRECHECK_PYTHON` environment variable to the full Python path.
+
 Backend setup:
 
 ```powershell
@@ -126,13 +162,16 @@ The tool does not connect to DHCP servers and does not use PowerShell remoting f
 DHCP_REFERENCE_PATH=\\fileserver\share\dhcp_exports
 ```
 
-`DHCP_REFERENCE_PATH` may be either a single `.csv` / `.json` file or a folder containing monthly exported `.csv` / `.json` files. The check reads the ranges locally and flags an applicant IP when it falls inside a DHCP dynamic allocation range.
+`DHCP_REFERENCE_PATH` may be either a single `.csv` / `.json` file or a folder containing monthly exported `.csv` / `.json` files. The check reads the ranges locally and flags an applicant IP when it falls inside a DHCP dynamic allocation range. DHCP exclusion ranges are respected: if an IP is inside a scope but also inside an exclusion range, it is not treated as a dynamic DHCP address.
+
+When `DHCP_REFERENCE_PATH` is a folder, the tool also checks for export freshness and `dhcp_export_status.json`. If the DHCP export is stale, failed, or malformed, the request is routed to `needs_confirmation` with a DHCP reference warning so support can manually verify it.
 
 Supported CSV columns include the names from `Get-DhcpServerv4Scope | Export-Csv`, especially:
 
 ```csv
-ScopeId,Name,StartRange,EndRange
-192.0.2.0,Office LAN,192.0.2.10,192.0.2.50
+RangeType,ScopeId,Name,StartRange,EndRange
+scope,192.0.2.0,Office LAN,192.0.2.10,192.0.2.50
+exclusion,192.0.2.0,Office LAN,192.0.2.20,192.0.2.25
 ```
 
 Supported JSON can be either a list or an object with `scopes` / `ranges`:
@@ -141,10 +180,13 @@ Supported JSON can be either a list or an object with `scopes` / `ranges`:
 {
   "scopes": [
     {"name": "Office LAN", "start": "192.0.2.10", "end": "192.0.2.50"}
+  ],
+  "exclusions": [
+    {"name": "Office LAN", "start": "192.0.2.20", "end": "192.0.2.25"}
   ]
 }
 ```
 
 If an IP is inside a DHCP range, the output goes to `needs_confirmation` and asks support to confirm with the applicant that the IP is fixed/static.
 
-For DHCP/AD server-side monthly export scripts, see `forAD/`. Those scripts export DHCP scope ranges to a shared folder for this tool to read.
+For DHCP/AD server-side monthly export scripts, see `forAD/`. Those scripts export DHCP scope ranges to a shared folder for this tool to read and also write `dhcp_export_status.json` for validation.

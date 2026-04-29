@@ -4,6 +4,14 @@ These scripts run on the DHCP server side. They do not use PowerShell remoting.
 
 The goal is to export DHCP scope/range information once a month into a folder that the support precheck tool can read through `DHCP_REFERENCE_PATH`.
 
+These scripts now include export-side validation:
+
+- fail if no IPv4 scopes are found
+- fail if required fields are missing
+- fail if `StartRange` is greater than `EndRange`
+- export DHCP exclusion ranges as `RangeType=exclusion`
+- always write `dhcp_export_status.json` so the support tool can verify export freshness and success
+
 ## Files
 
 - `.env.example`: sample settings. Copy it to `.env` and edit locally.
@@ -28,10 +36,28 @@ cd C:\path\to\ICS-support-precheck\forAD
 .\export_dhcp_ranges.ps1
 ```
 
+Expected output:
+
+- one or more `dhcp_scopes_yyyyMMdd_HHmmss.csv` / `.json` files
+- `dhcp_export_status.json`
+
 The generated CSV includes columns such as:
 
 ```csv
-ScopeId,Name,StartRange,EndRange,SubnetMask,State,LeaseDuration,ExportedAt,ServerName
+RangeType,ScopeId,Name,StartRange,EndRange,SubnetMask,State,LeaseDuration,ExportedAt,ServerName
+```
+
+The generated status file includes fields such as:
+
+```json
+{
+  "success": true,
+  "exported_at": "2026-04-27 06:00:00",
+  "server_name": "DHCP01",
+  "scope_count": 12,
+  "exclusion_count": 3,
+  "data_files": ["dhcp_scopes_20260427_060000.csv"]
+}
 ```
 
 On the support tool side, point `config\.env` to this output folder:

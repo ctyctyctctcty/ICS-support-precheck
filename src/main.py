@@ -12,6 +12,7 @@ from checks import (
     StandardRow,
     ad_user_check,
     dhcp_check,
+    validate_dhcp_reference,
     normalize_ip_value,
     reverse_dns_check,
     validate_row,
@@ -61,6 +62,12 @@ def run_checks(rows: List[StandardRow], settings: Dict, env: Dict[str, str]) -> 
     internet_aliases = settings.get('internet_aliases', [])
     required_group = _env_value(env, 'REQUIRED_SECURITY_GROUP', settings.get('required_security_group', ''))
     dhcp_reference_path = _env_value(env, 'DHCP_REFERENCE_PATH')
+    dhcp_state = validate_dhcp_reference(dhcp_reference_path)
+    if dhcp_state.issues:
+        label = dhcp_state.latest_export_label
+        for item in dhcp_state.issues:
+            detail = item if not label else f'{item}, latest={label}'
+            result.confirmations.append(f'DHCP参照異常 ({detail})')
 
     for row in rows:
         normalized_ip, ip_kind, ip_error = normalize_ip_value(row.IP, internet_aliases)
@@ -76,7 +83,8 @@ def run_checks(rows: List[StandardRow], settings: Dict, env: Dict[str, str]) -> 
             continue
 
         result.confirmations.extend(reverse_dns_check(row, ip_kind))
-        result.confirmations.extend(dhcp_check(row, ip_kind, dhcp_reference_path))
+        if not dhcp_state.issues:
+            result.confirmations.extend(dhcp_check(row, ip_kind, ranges=dhcp_state.ranges, exclusions=dhcp_state.exclusions))
 
     return result
 
