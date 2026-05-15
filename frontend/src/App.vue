@@ -291,7 +291,7 @@ onUnmounted(stopProgress)
       <div class="section-title">
         <div>
           <h2>出力先フォルダ</h2>
-          <p>処理結果はローカルの各フォルダにも保存されます。</p>
+          <p>処理結果はサーバー上の各出力フォルダに保存されます。必要なファイルは上のリンクからダウンロードしてください。</p>
         </div>
       </div>
       <dl>
