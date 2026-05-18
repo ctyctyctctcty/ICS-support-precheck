@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / 'src'))
 
 from ai_client import draft_issue_reply, load_ai_config, model_candidates
 from checks import StandardRow, dhcp_check, load_dhcp_ranges, normalize_ip_value, validate_dhcp_reference, validate_row
+from main import copy_standard_output, write_success_outputs, validate_rows
 from parser import parse_with_rules
 from reports import confirmation_message
 from xlsx_io import SheetData, read_workbook, write_standard_workbook
@@ -51,6 +52,8 @@ class CoreFlowTests(unittest.TestCase):
         self.assertEqual(result.rows[1].company, 'Example')
         self.assertEqual(result.rows[1].hostname, 'server02')
         self.assertEqual(result.rows[1].IP, 'internet access')
+        self.assertEqual(result.rows[0].source_row, 2)
+        self.assertEqual(result.rows[1].source_row, 3)
 
     def test_validate_row_normalizes_internet_access(self) -> None:
         row = StandardRow(userID='user01', name='User One', IP='internet access')
@@ -60,12 +63,77 @@ class CoreFlowTests(unittest.TestCase):
         self.assertIsNotNone(valid)
         self.assertEqual(valid.IP, 'Internet Access')
 
+    def test_validate_row_accepts_internet_access_in_hostname(self) -> None:
+        row = StandardRow(userID='user01', name='User One', hostname='internet access', IP='')
+        valid, blockers = validate_row(row, INTERNET_ALIASES)
+
+        self.assertEqual(blockers, [])
+        self.assertIsNotNone(valid)
+        self.assertEqual(valid.IP, 'Internet Access')
+        self.assertEqual(valid.hostname, '')
+
+    def test_validate_row_clears_hostname_alias_when_ip_is_internet(self) -> None:
+        row = StandardRow(userID='user01', name='User One', hostname='internet-access', IP='Internet Access')
+        valid, blockers = validate_row(row, INTERNET_ALIASES)
+
+        self.assertEqual(blockers, [])
+        self.assertIsNotNone(valid)
+        self.assertEqual(valid.IP, 'Internet Access')
+        self.assertEqual(valid.hostname, '')
+
+    def test_validate_rows_reports_excel_row_number(self) -> None:
+        rows = [StandardRow(userID='user01', name='User One', email='bad-email', IP='192.0.2.10', source_row=7)]
+        _, blockers, _ = validate_rows(rows, INTERNET_ALIASES)
+
+        self.assertEqual(len(blockers), 1)
+        self.assertTrue(blockers[0].startswith('Row 7:'))
+
     def test_normalize_ip_accepts_cidr(self) -> None:
         value, kind, error = normalize_ip_value('192.0.2.0/24', INTERNET_ALIASES)
 
         self.assertEqual(value, '192.0.2.0/24')
         self.assertEqual(kind, 'cidr')
         self.assertIsNone(error)
+
+    def test_normalize_ip_accepts_slashless_internet_access_alias(self) -> None:
+        value, kind, error = normalize_ip_value('InternetAccess', INTERNET_ALIASES)
+
+        self.assertEqual(value, 'Internet Access')
+        self.assertEqual(kind, 'internet')
+        self.assertIsNone(error)
+
+    def test_copy_standard_output_skips_when_destination_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workbook_path = Path(tmp) / 'request_standard.xlsx'
+            workbook_path.write_text('dummy', encoding='utf-8')
+
+            copied = copy_standard_output(workbook_path, {})
+
+        self.assertIsNone(copied)
+
+    def test_write_success_outputs_copies_standard_workbook_when_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_path = tmp_path / 'request.xlsx'
+            source_path.write_text('dummy', encoding='utf-8')
+            output_dir = tmp_path / 'network_ready'
+            copy_dir = tmp_path / 'copied'
+            settings = {'standard_columns': ['userID', 'name', 'company', 'email', 'hostname', 'IP']}
+            rows = [StandardRow(userID='user01', name='User One', IP='Internet Access')]
+
+            workbook_path = write_success_outputs(
+                source_path,
+                output_dir,
+                settings,
+                rows,
+                {'STANDARD_COPY_DESTINATION': str(copy_dir)},
+            )
+
+            copied_files = sorted(copy_dir.glob('*_standard.xlsx'))
+
+            self.assertTrue(workbook_path.exists())
+            self.assertEqual(len(copied_files), 1)
+            self.assertEqual(copied_files[0].name, workbook_path.name)
 
     def test_dhcp_check_uses_local_csv_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -25,6 +25,7 @@ class StandardRow:
     email: str = ''
     hostname: str = ''
     IP: str = ''
+    source_row: int = 0
 
     def as_dict(self) -> Dict[str, str]:
         return {
@@ -88,9 +89,13 @@ def compact_text(value: str) -> str:
     return re.sub(r'\s+', '', str(value or '')).lower()
 
 
+def compact_alias_text(value: str) -> str:
+    return re.sub(r'[\s_\-./\\]+', '', str(value or '')).lower()
+
+
 def normalize_internet(value: str, aliases: Sequence[str]) -> Optional[str]:
-    text = compact_text(value)
-    alias_set = {compact_text(alias) for alias in aliases}
+    text = compact_alias_text(value)
+    alias_set = {compact_alias_text(alias) for alias in aliases}
     if text in alias_set:
         return 'Internet Access'
     return None
@@ -125,7 +130,15 @@ def validate_row(row: StandardRow, internet_aliases: Sequence[str]) -> tuple[Opt
     blockers: List[str] = []
     user_id = row.userID.strip()
     name = row.name.strip()
-    ip_value, _, ip_error = normalize_ip_value(row.IP, internet_aliases)
+    raw_hostname = row.hostname.strip()
+    raw_ip = row.IP.strip()
+    hostname_internet = normalize_internet(raw_hostname, internet_aliases)
+    hostname = '' if hostname_internet else raw_hostname
+    ip_value, _, ip_error = normalize_ip_value(raw_ip, internet_aliases)
+
+    if hostname_internet and (not raw_ip or normalize_internet(raw_ip, internet_aliases)):
+        ip_value = 'Internet Access'
+        ip_error = None
 
     if not user_id:
         blockers.append('Target account is missing.')
@@ -142,7 +155,6 @@ def validate_row(row: StandardRow, internet_aliases: Sequence[str]) -> tuple[Opt
     if email and not EMAIL_RE.fullmatch(email):
         blockers.append(f'Invalid target user email address format: {email}')
 
-    hostname = row.hostname.strip()
     if hostname and not HOSTNAME_RE.fullmatch(hostname):
         blockers.append(f'Invalid destination hostname format: {hostname}')
 
@@ -156,6 +168,7 @@ def validate_row(row: StandardRow, internet_aliases: Sequence[str]) -> tuple[Opt
         email=email,
         hostname=hostname,
         IP=ip_value or row.IP.strip(),
+        source_row=row.source_row,
     ), []
 
 

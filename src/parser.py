@@ -116,7 +116,7 @@ def parse_with_rules(sheets: Sequence[SheetData]) -> ParseResult:
 
     parsed: List[StandardRow] = []
     previous: Dict[str, str] = {}
-    for row in sheet.rows[header_idx + 1:]:
+    for excel_row_number, row in enumerate(sheet.rows[header_idx + 1:], start=header_idx + 2):
         if _is_example_row(row):
             continue
         if not any(str(cell).strip() for cell in row):
@@ -140,6 +140,7 @@ def parse_with_rules(sheets: Sequence[SheetData]) -> ParseResult:
             email=values.get('email', ''),
             hostname=values.get('hostname', ''),
             IP=values.get('ip', ''),
+            source_row=excel_row_number,
         ))
 
     if not parsed:
@@ -164,6 +165,7 @@ Extract VPN application rows from this Japanese Excel text.
 
 Rules:
 - Put Japanese Internet Access-like values in ip as exactly "Internet Access".
+- If an Internet Access-like value appears in hostname instead of ip, move it to ip and leave hostname empty.
 - Carry forward "同上", "〃", or similar same-as-above values from the previous data row.
 - Ignore example/sample rows.
 - If a value is missing, use an empty string.
@@ -210,6 +212,7 @@ def parse_with_ai(path: Path, env: Dict[str, str]) -> ParseResult:
                 email=str(item.get('email', '') or ''),
                 hostname=str(item.get('hostname', '') or ''),
                 IP=str(item.get('ip', '') or ''),
+                source_row=0,
             ))
         if rows:
             return ParseResult(rows, [], used_ai=True, ai_model=model)

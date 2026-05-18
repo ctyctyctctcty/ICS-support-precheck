@@ -17,7 +17,7 @@ from checks import (
     reverse_dns_check,
     validate_row,
 )
-from config import data_dirs, load_env, load_settings, unique_path
+from config import data_dirs, load_env, load_settings, resolve_path, unique_path
 from parser import parse_application, parse_with_ai
 from reports import applicant_error_message, confirmation_message, write_text
 from xlsx_io import read_workbook, write_standard_workbook
@@ -44,7 +44,8 @@ def validate_rows(rows: List[StandardRow], internet_aliases: List[str]) -> Tuple
     for index, row in enumerate(rows, start=1):
         valid, row_blockers = validate_row(row, internet_aliases)
         if row_blockers:
-            blockers.extend(f'Row {index}: {item}' for item in row_blockers)
+            row_label = row.source_row if row.source_row > 0 else index
+            blockers.extend(f'Row {row_label}: {item}' for item in row_blockers)
             continue
         if valid is not None:
             valid_rows.append(valid)
@@ -89,10 +90,26 @@ def run_checks(rows: List[StandardRow], settings: Dict, env: Dict[str, str]) -> 
     return result
 
 
-def write_success_outputs(source_path: Path, target_dir: Path, settings: Dict, rows: List[StandardRow]) -> Path:
+def copy_standard_output(workbook_path: Path, env: Dict[str, str]) -> Path | None:
+    destination_raw = _env_value(env, 'STANDARD_COPY_DESTINATION')
+    if not destination_raw:
+        return None
+
+    destination_dir = resolve_path(destination_raw).expanduser()
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination_path = unique_path(destination_dir / workbook_path.name)
+    shutil.copy2(str(workbook_path), str(destination_path))
+    return destination_path
+
+
+def write_success_outputs(source_path: Path, target_dir: Path, settings: Dict, rows: List[StandardRow], env: Dict[str, str]) -> Path:
     headers = settings['standard_columns']
     workbook_path = unique_path(target_dir / standard_name(source_path))
     write_standard_workbook(workbook_path, headers, [row.as_dict() for row in rows])
+    try:
+        copy_standard_output(workbook_path, env)
+    except Exception as exc:
+        print(f'Warning: standard workbook copy failed for {workbook_path.name}: {exc}')
     return workbook_path
 
 
@@ -151,13 +168,13 @@ def process_file(source_path: Path, settings: Dict, env: Dict[str, str], dirs: D
 
     if check_result.confirmations:
         target_dir = dirs['needs_confirmation']
-        write_success_outputs(source_path, target_dir, settings, rows)
+        write_success_outputs(source_path, target_dir, settings, rows, env)
         write_confirmation_report(source_path, target_dir, check_result.confirmations, env)
         move_source(source_path, target_dir)
         return 'needs_confirmation'
 
     target_dir = dirs['network_ready']
-    write_success_outputs(source_path, target_dir, settings, rows)
+    write_success_outputs(source_path, target_dir, settings, rows, env)
     move_source(source_path, target_dir)
     return 'network_ready'
 

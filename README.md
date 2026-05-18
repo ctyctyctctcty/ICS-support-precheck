@@ -189,4 +189,16 @@ Supported JSON can be either a list or an object with `scopes` / `ranges`:
 
 If an IP is inside a DHCP range, the output goes to `needs_confirmation` and asks support to confirm with the applicant that the IP is fixed/static.
 
+## Optional standard file copy
+
+If you want every generated standard workbook to be copied to another folder at the same time, set this in `config/.env`:
+
+```dotenv
+STANDARD_COPY_DESTINATION=
+```
+
+When this value is filled, each newly generated `*_standard.xlsx` in `data/network_ready` or `data/needs_confirmation` is also copied to that destination folder. Leave it empty to disable the feature.
+
+If the destination is on your own PC, use a path that the server can reach, such as a shared folder path.
+
 For DHCP/AD server-side monthly export scripts, see `forAD/`. Those scripts export DHCP scope ranges to a shared folder for this tool to read and also write `dhcp_export_status.json` for validation.
