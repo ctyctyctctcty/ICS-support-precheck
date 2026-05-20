@@ -112,12 +112,14 @@ def normalize_ip_value(value: str, internet_aliases: Sequence[str]) -> tuple[Opt
 
     try:
         if '/' in raw:
-            network = ipaddress.ip_network(raw, strict=False)
-            if network.version != 4:
+            interface = ipaddress.ip_interface(raw)
+            if interface.version != 4:
                 return None, None, 'Only IPv4 CIDR ranges are supported.'
-            if network.prefixlen == 32:
-                return str(network.network_address), 'ip', None
-            return str(network), 'cidr', None
+            if interface.network.prefixlen == 32:
+                return str(interface.ip), 'ip', None
+            if interface.ip == interface.network.network_address:
+                return str(interface.network), 'cidr_range', None
+            return str(interface.ip), 'cidr_host', None
         ip = ipaddress.ip_address(raw)
         if ip.version != 4:
             return None, None, 'Only IPv4 addresses are supported.'
@@ -264,6 +266,22 @@ def reverse_dns_check(row: StandardRow, ip_kind: str) -> List[str]:
     if any(short_hostname(name) == requested for name in names):
         return []
     return [jp_item(row.userID, 'ホスト名一致しない', f'申請={row.hostname}, 逆引き={", ".join(names)}')]
+
+
+def cidr_confirmation_message(row: StandardRow, ip_kind: str, original_value: str) -> Optional[str]:
+    if ip_kind == 'cidr_host':
+        return jp_item(
+            row.userID,
+            'CIDR入力確認',
+            f'申請値={original_value}, 単一IP候補={row.IP}, 申請者は単一IPを意図した可能性があります。サブネット表記のままでよいか確認してください',
+        )
+    if ip_kind == 'cidr_range':
+        return jp_item(
+            row.userID,
+            'CIDR範囲確認',
+            f'申請値={original_value}, 範囲指定={row.IP}, 本当にネットワーク範囲アクセスが必要か申請者へ確認してください',
+        )
+    return None
 
 
 def _first_value(record: Dict[str, Any], keys: Iterable[str]) -> str:

@@ -11,6 +11,7 @@ from checks import (
     CheckResult,
     StandardRow,
     ad_user_check,
+    cidr_confirmation_message,
     dhcp_check,
     validate_dhcp_reference,
     normalize_ip_value,
@@ -71,11 +72,16 @@ def run_checks(rows: List[StandardRow], settings: Dict, env: Dict[str, str]) -> 
             result.confirmations.append(f'DHCP参照異常 ({detail})')
 
     for row in rows:
+        original_ip_value = row.IP
         normalized_ip, ip_kind, ip_error = normalize_ip_value(row.IP, internet_aliases)
         if ip_error or not normalized_ip or not ip_kind:
             result.blockers.append(f'{row.userID}: {ip_error or "IP address could not be verified."}')
             continue
         row.IP = normalized_ip
+
+        cidr_confirmation = cidr_confirmation_message(row, ip_kind, original_ip_value)
+        if cidr_confirmation:
+            result.confirmations.append(cidr_confirmation)
 
         ad_blockers, ad_confirmations = ad_user_check(row.userID, required_group)
         result.blockers.extend(ad_blockers)
@@ -83,9 +89,15 @@ def run_checks(rows: List[StandardRow], settings: Dict, env: Dict[str, str]) -> 
         if ad_blockers:
             continue
 
-        result.confirmations.extend(reverse_dns_check(row, ip_kind))
+        dns_dhcp_kind = ip_kind
+        if ip_kind == 'cidr_host':
+            dns_dhcp_kind = 'ip'
+        elif ip_kind == 'cidr_range':
+            continue
+
+        result.confirmations.extend(reverse_dns_check(row, dns_dhcp_kind))
         if not dhcp_state.issues:
-            result.confirmations.extend(dhcp_check(row, ip_kind, ranges=dhcp_state.ranges, exclusions=dhcp_state.exclusions))
+            result.confirmations.extend(dhcp_check(row, dns_dhcp_kind, ranges=dhcp_state.ranges, exclusions=dhcp_state.exclusions))
 
     return result
 

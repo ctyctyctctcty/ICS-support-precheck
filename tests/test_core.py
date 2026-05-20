@@ -4,13 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
 
 from ai_client import draft_issue_reply, load_ai_config, model_candidates
-from checks import StandardRow, dhcp_check, load_dhcp_ranges, normalize_ip_value, validate_dhcp_reference, validate_row
-from main import copy_standard_output, write_success_outputs, validate_rows
+from checks import DhcpReferenceState, StandardRow, dhcp_check, load_dhcp_ranges, normalize_ip_value, validate_dhcp_reference, validate_row
+from main import copy_standard_output, run_checks, write_success_outputs, validate_rows
 from parser import parse_with_rules
 from reports import confirmation_message
 from xlsx_io import SheetData, read_workbook, write_standard_workbook
@@ -88,11 +89,11 @@ class CoreFlowTests(unittest.TestCase):
         self.assertEqual(len(blockers), 1)
         self.assertTrue(blockers[0].startswith('Row 7:'))
 
-    def test_normalize_ip_accepts_cidr(self) -> None:
-        value, kind, error = normalize_ip_value('192.0.2.0/24', INTERNET_ALIASES)
+    def test_normalize_ip_accepts_cidr_host(self) -> None:
+        value, kind, error = normalize_ip_value('172.25.167.14/22', INTERNET_ALIASES)
 
-        self.assertEqual(value, '192.0.2.0/24')
-        self.assertEqual(kind, 'cidr')
+        self.assertEqual(value, '172.25.167.14')
+        self.assertEqual(kind, 'cidr_host')
         self.assertIsNone(error)
 
     def test_normalize_ip_accepts_slashless_internet_access_alias(self) -> None:
@@ -100,6 +101,20 @@ class CoreFlowTests(unittest.TestCase):
 
         self.assertEqual(value, 'Internet Access')
         self.assertEqual(kind, 'internet')
+        self.assertIsNone(error)
+
+    def test_normalize_ip_accepts_cidr_range(self) -> None:
+        value, kind, error = normalize_ip_value('172.25.164.0/22', INTERNET_ALIASES)
+
+        self.assertEqual(value, '172.25.164.0/22')
+        self.assertEqual(kind, 'cidr_range')
+        self.assertIsNone(error)
+
+    def test_normalize_ip_accepts_slash32_as_single_ip(self) -> None:
+        value, kind, error = normalize_ip_value('192.0.2.10/32', INTERNET_ALIASES)
+
+        self.assertEqual(value, '192.0.2.10')
+        self.assertEqual(kind, 'ip')
         self.assertIsNone(error)
 
     def test_copy_standard_output_skips_when_destination_is_empty(self) -> None:
@@ -134,6 +149,40 @@ class CoreFlowTests(unittest.TestCase):
             self.assertTrue(workbook_path.exists())
             self.assertEqual(len(copied_files), 1)
             self.assertEqual(copied_files[0].name, workbook_path.name)
+
+    def test_run_checks_adds_confirmation_for_cidr_host_and_runs_ip_checks(self) -> None:
+        row = StandardRow(userID='user01', name='User One', hostname='server01', IP='172.25.167.14/22')
+        settings = {'internet_aliases': INTERNET_ALIASES, 'required_security_group': ''}
+        with patch('main.validate_dhcp_reference', return_value=DhcpReferenceState()):
+            with patch('main.ad_user_check', return_value=([], [])):
+                with patch('main.reverse_dns_check', return_value=['dns checked']) as dns_mock:
+                    with patch('main.dhcp_check', return_value=['dhcp checked']) as dhcp_mock:
+                        result = run_checks([row], settings, {})
+
+        self.assertFalse(result.blockers)
+        self.assertTrue(any('CIDR入力確認' in item for item in result.confirmations))
+        self.assertIn('dns checked', result.confirmations)
+        self.assertIn('dhcp checked', result.confirmations)
+        self.assertEqual(row.IP, '172.25.167.14')
+        self.assertEqual(dns_mock.call_args[0][1], 'ip')
+        self.assertEqual(dhcp_mock.call_args[0][1], 'ip')
+
+    def test_run_checks_adds_confirmation_for_cidr_range_and_skips_ip_checks(self) -> None:
+        row = StandardRow(userID='user01', name='User One', hostname='server01', IP='172.25.164.0/22')
+        settings = {'internet_aliases': INTERNET_ALIASES, 'required_security_group': ''}
+        with patch('main.validate_dhcp_reference', return_value=DhcpReferenceState()):
+            with patch('main.ad_user_check', return_value=([], [])):
+                with patch('main.reverse_dns_check', return_value=['dns checked']) as dns_mock:
+                    with patch('main.dhcp_check', return_value=['dhcp checked']) as dhcp_mock:
+                        result = run_checks([row], settings, {})
+
+        self.assertFalse(result.blockers)
+        self.assertTrue(any('CIDR範囲確認' in item for item in result.confirmations))
+        self.assertNotIn('dns checked', result.confirmations)
+        self.assertNotIn('dhcp checked', result.confirmations)
+        self.assertEqual(row.IP, '172.25.164.0/22')
+        dns_mock.assert_not_called()
+        dhcp_mock.assert_not_called()
 
     def test_dhcp_check_uses_local_csv_reference(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -189,6 +189,16 @@ Supported JSON can be either a list or an object with `scopes` / `ranges`:
 
 If an IP is inside a DHCP range, the output goes to `needs_confirmation` and asks support to confirm with the applicant that the IP is fixed/static.
 
+## CIDR handling
+
+Applicant IP input now treats CIDR values conservatively:
+
+- `192.0.2.10` stays a normal single IP.
+- `192.0.2.10/32` is treated as the same single IP and still runs normal reverse DNS / DHCP checks.
+- Host-like CIDR such as `172.25.167.14/22` is treated as a likely single-IP request with an attached subnet mask by mistake. The standard workbook uses `172.25.167.14`, reverse DNS / DHCP checks still run, and the request goes to `needs_confirmation`.
+- Range-like CIDR such as `172.25.164.0/22` stays as a range value. The request goes to `needs_confirmation`, and single-IP reverse DNS / DHCP checks are skipped until support confirms whether range access is really required.
+- Invalid IP / CIDR input still remains an error blocker.
+
 ## Optional standard file copy
 
 If you want every generated standard workbook to be copied to another folder at the same time, set this in `config/.env`:
